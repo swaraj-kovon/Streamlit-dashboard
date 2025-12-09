@@ -1,94 +1,110 @@
 import streamlit as st
-from supabase import create_client, Client
 import pandas as pd
 from dotenv import load_dotenv
 import os
-import sqlite3
-import bcrypt
 from typing import List, Dict, Any, Sequence, cast
 
+from auth import signup, signin, get_current_user, signout
+from supabase import create_client, Client
+
+# -----------------------------------------------------------
+# ENV + SUPABASE CLIENT
+# -----------------------------------------------------------
 load_dotenv()
 
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_SERVICE_ROLE") or os.getenv("SUPABASE_KEY")
-if SUPABASE_URL is None:
-    raise ValueError("SUPABASE_URL is missing")
-if SUPABASE_KEY is None:
-    raise ValueError("SUPABASE_SERVICE_ROLE or SUPABASE_KEY is missing")
-SUPABASE_URL = cast(str, SUPABASE_URL)
-SUPABASE_KEY = cast(str, SUPABASE_KEY)
 
-DB_PATH = "users.db"
+if not SUPABASE_URL or not SUPABASE_KEY:
+    raise ValueError("Supabase environment variables missing")
 
+supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
-def init_db():
-    conn = sqlite3.connect(DB_PATH)
-    cur = conn.cursor()
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS users (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            email TEXT UNIQUE NOT NULL,
-            password_hash TEXT NOT NULL,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
-    conn.commit()
-    conn.close()
+# -----------------------------------------------------------
+# STREAMLIT SESSION
+# -----------------------------------------------------------
+st.set_page_config(page_title="Supabase Dashboard", layout="wide")
+
+if "logged_in" not in st.session_state:
+    st.session_state.logged_in = False
+
+if "page" not in st.session_state:
+    st.session_state.page = "login"
 
 
-def create_user(email: str, password: str) -> bool:
-    if not email.endswith("@kovon.io"):
-        return False
-    conn = sqlite3.connect(DB_PATH)
-    cur = conn.cursor()
-    hashed = bcrypt.hashpw(password.encode(), bcrypt.gensalt())
-    try:
-        cur.execute("INSERT INTO users (email, password_hash) VALUES (?, ?)", (email, hashed))
-        conn.commit()
-        return True
-    except sqlite3.IntegrityError:
-        return False
-    finally:
-        conn.close()
+# -----------------------------------------------------------
+# LOGIN PAGE
+# -----------------------------------------------------------
+def login_page():
+    st.title("🔐 Login")
+
+    email = st.text_input("Email")
+    password = st.text_input("Password", type="password")
+
+    if st.button("Login"):
+        res = signin(email, password)
+
+        if "error" in res:
+            st.error("❌ " + res["error"])
+        else:
+            st.success("Logged in successfully!")
+            st.session_state.logged_in = True
+            st.session_state.page = "dashboard"
+            st.rerun()
+
+    st.markdown("---")
+    st.subheader("Create Account")
+
+    su_email = st.text_input("Signup Email (@kovon.io only)")
+    su_password = st.text_input("Signup Password", type="password")
+
+    if st.button("Sign Up"):
+        if not su_email.endswith("@kovon.io"):
+            st.error("Only @kovon.io emails allowed")
+            return
+
+        res = signup(su_email, su_password)
+
+        if "error" in res:
+            st.error("❌ " + res["error"])
+        else:
+            st.success("🎉 Account created! Check your email to verify your account.")
 
 
-def authenticate_user(email: str, password: str) -> bool:
-    conn = sqlite3.connect(DB_PATH)
-    cur = conn.cursor()
-    cur.execute("SELECT password_hash FROM users WHERE email = ?", (email,))
-    row = cur.fetchone()
-    conn.close()
-    if not row:
-        return False
-    stored_hash = row[0]
-    return bcrypt.checkpw(password.encode(), stored_hash)
+# -----------------------------------------------------------
+# SIDEBAR NAVIGATION
+# -----------------------------------------------------------
+def navbar():
+    with st.sidebar:
+        st.header("Navigation")
+
+        if st.button("🏠 Dashboard", key="nav_dashboard"):
+            st.session_state.page = "dashboard"
+            st.rerun()
+
+        if st.button("📊 Analytics", key="nav_analytics"):
+            st.session_state.page = "analytics"
+            st.rerun()
+
+        st.markdown("---")
+
+        if st.button("🚪 Logout", key="nav_logout"):
+            signout()
+            st.session_state.logged_in = False
+            st.session_state.page = "login"
+            st.rerun()
 
 
-init_db()
-
-
-@st.cache_resource
-def get_supabase() -> Client:
-    supabase_url = os.getenv("SUPABASE_URL")
-    supabase_key = os.getenv("SUPABASE_SERVICE_ROLE") or os.getenv("SUPABASE_KEY")
-    if supabase_url is None or supabase_key is None:
-        raise ValueError("Supabase env variables missing")
-    supabase_url = cast(str, supabase_url)
-    supabase_key = cast(str, supabase_key)
-    return create_client(supabase_url, supabase_key)
-
-
-supabase: Client = get_supabase()
-
-
+# ===========================================================
+#              SUPABASE TABLE + SQL HELPERS
+# ===========================================================
 def list_tables() -> List[str]:
     try:
         result = supabase.rpc("get_public_tables").execute()
-        raw_data = result.data
-        if not isinstance(raw_data, list):
+        raw = result.data
+        if not isinstance(raw, list):
             return []
-        cleaned_rows = [row for row in raw_data if isinstance(row, dict)]
-        return [row["name"] for row in cleaned_rows if "name" in row]  # type: ignore
+        return [row["name"] for row in raw if isinstance(row, dict) and "name" in row]
     except Exception as e:
         st.error(f"Error fetching table names: {e}")
         return []
@@ -118,62 +134,71 @@ def run_custom_sql(sql: str) -> List[Dict[str, Any]]:
         return []
 
 
-def login_page():
-    st.title("🔐 Login")
-    email = st.text_input("Email")
-    password = st.text_input("Password", type="password")
-    if st.button("Login"):
-        if authenticate_user(email, password):
-            st.session_state.logged_in = True
-            st.session_state.user_email = email
-            st.rerun()
+# ===========================================================
+#                    DASHBOARD PAGE
+# ===========================================================
+def dashboard_page():
+    st.title("📊 Supabase Dashboard")
+
+    st.sidebar.header("🔍 Select Tables")
+    tables = list_tables()
+
+    selected_tables = st.sidebar.multiselect("Choose tables", tables, default=[])
+
+    st.markdown("### 🧪 SQL Query Console")
+    sql_input = st.text_area("Write SQL here", placeholder="SELECT * FROM users LIMIT 10;")
+
+    if st.button("Run Query", key="run_sql"):
+        with st.spinner("Running..."):
+            data = run_custom_sql(sql_input)
+        if data:
+            st.dataframe(pd.DataFrame(data), use_container_width=True)
         else:
-            st.error("Invalid credentials")
+            st.warning("No results")
+
+    st.markdown("---")
+
+    if not selected_tables:
+        st.info("Select tables from sidebar.")
+        return
+
+    for table_name in selected_tables:
+        st.subheader(f"📄 {table_name}")
+        rows = fetch_table(table_name)
+
+        if not rows:
+            st.warning("No data")
+            continue
+
+        df = pd.DataFrame(rows)
+
+        with st.expander(f"Expand {table_name}", expanded=True):
+            view_mode = st.radio(
+                f"View mode for {table_name}",
+                ("Table View", "JSON View"),
+                key=f"mode_{table_name}",
+                horizontal=True,
+            )
+
+            if view_mode == "JSON View":
+                st.json(rows)
+                continue
+
+            all_columns = df.columns.tolist()
+            selected_columns = st.multiselect(
+                f"Select columns to display for {table_name}",
+                all_columns,
+                default=all_columns,
+                key=f"cols_{table_name}"
+            )
+
+            st.dataframe(df[selected_columns], use_container_width=True)
 
 
-def signup_page():
-    st.title("📝 Create Account")
-    email = st.text_input("Email (must be @kovon.io)")
-    password = st.text_input("Password", type="password")
-    confirm = st.text_input("Confirm Password", type="password")
-    if st.button("Sign Up"):
-        if not email.endswith("@kovon.io"):
-            st.error("Only @kovon.io emails allowed")
-            return
-        if password != confirm:
-            st.error("Passwords do not match")
-            return
-        if create_user(email, password):
-            st.success("Account created. You can now login.")
-        else:
-            st.error("User exists or invalid email")
-
-
-if "logged_in" not in st.session_state:
-    st.session_state.logged_in = False
-
-if "mode" not in st.session_state:
-    st.session_state.mode = "dashboard"
-
-
-if not st.session_state.logged_in:
-    choice = st.sidebar.radio("Authentication", ["Login", "Sign Up"])
-    if choice == "Login":
-        login_page()
-    else:
-        signup_page()
-    st.stop()
-
-page = st.sidebar.radio("Navigation", ["Dashboard", "Analytics"])
-
-
-#                           ANALYTICS
-
-#                           ANALYTICS
-
-  #                           ANALYTICS
-
-if page == "Analytics":
+# ===========================================================
+#               ANALYTICS PAGE (FULL LOGIC PRESERVED)
+# ===========================================================
+def analytics_page():
     st.title("📈 Analytics")
 
     # ---------------------------------------------------
@@ -505,50 +530,26 @@ if page == "Analytics":
 
     st.stop()
 
+    
+# ===========================================================
+# MAIN ROUTING (CLEAN + CORRECT)
+# ===========================================================
 
+# If NOT logged in → show login
+if not st.session_state.logged_in:
+    st.session_state.page = "login"
+    login_page()
+    st.stop()
 
-#                           DASHBOARD
-elif page == "Dashboard":
+# If logged in → show navbar
+navbar()
 
-    st.set_page_config(page_title="Supabase Dashboard", layout="wide")
-    st.title("📊 Supabase Dashboard")
-    st.sidebar.header("🔍 Select Tables")
-    tables = list_tables()
-    selected_tables = st.sidebar.multiselect("Choose tables", tables, default=[])
-    st.markdown("### 🧪 SQL Query Console")
-    sql_input = st.text_area("Write SQL here", placeholder="SELECT * FROM users LIMIT 10;")
-    if st.button("Run Query"):
-        with st.spinner("Running..."):
-            data = run_custom_sql(sql_input)
-        if data:
-            st.dataframe(pd.DataFrame(data), width='stretch')
-        else:
-            st.warning("No results")
-    st.markdown("---")
-    if not selected_tables:
-        st.info("Select tables from sidebar.")
-    else:
-        for table_name in selected_tables:
-            st.subheader(f"📄 {table_name}")
-            rows = fetch_table(table_name)
-            if not rows:
-                st.warning("No data")
-                continue
-            df = pd.DataFrame(rows)
-            with st.expander(f"Expand {table_name}", expanded=True):
-                view_mode = st.radio(
-                    f"View mode for {table_name}",
-                    ("Table View", "JSON View"),
-                    key=f"mode_{table_name}",
-                    horizontal=True,
-                )
-                if view_mode == "JSON View":
-                    st.json(rows)
-                all_columns = df.columns.tolist()
-                selected_columns = st.multiselect(
-                    f"Select columns to display for {table_name}",
-                    all_columns,
-                    default=all_columns
-                )
+# Route to correct page
+if st.session_state.page == "dashboard":
+    dashboard_page()
 
-                st.dataframe(df[selected_columns], use_container_width=True)
+elif st.session_state.page == "analytics":
+    analytics_page()
+
+else:
+    login_page()
