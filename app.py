@@ -176,11 +176,17 @@ page = st.sidebar.radio("Navigation", ["Dashboard", "Analytics"])
 if page == "Analytics":
     st.title("📈 Analytics")
 
+    # ---------------------------------------------------
+    # Load Supabase table list
+    # ---------------------------------------------------
     tables = list_tables()
     if not tables:
         st.error("No tables available.")
         st.stop()
 
+    # ---------------------------------------------------
+    # Load table into DataFrame (cached)
+    # ---------------------------------------------------
     @st.cache_data
     def get_table_df(table_name: str) -> pd.DataFrame:
         rows = fetch_table(table_name)
@@ -188,30 +194,32 @@ if page == "Analytics":
             return pd.DataFrame()
         df = pd.DataFrame(rows)
 
-        # Auto-detect datetime fields and convert to UTC-aware datetime64
+        # Convert common date-like columns to datetime
         for col in df.columns:
             if any(k in col.lower() for k in ["updated", "created", "timestamp", "date"]):
                 df[col] = pd.to_datetime(df[col], errors="coerce", utc=True)
+
         return df
 
-    def pick_column(candidates: list[str], cols: list[str]) -> str | None:
-        col_set = set(cols)
+    # ---------------------------------------------------
+    # Utility: find likely matching column name
+    # ---------------------------------------------------
+    def pick_column(candidates: list[str], cols: list[str]):
+        cset = {c.lower(): c for c in cols}
         for c in candidates:
-            if c in col_set:
-                return c
-        lower_map = {c.lower(): c for c in cols}
-        for c in candidates:
-            if c.lower() in lower_map:
-                return lower_map[c.lower()]
+            if c.lower() in cset:
+                return cset[c.lower()]
         return None
 
-    # ---------- RULE STATE SETUP ----------
+    # ---------------------------------------------------
+    # RULE STATE
+    # ---------------------------------------------------
     if "analytics_rules" not in st.session_state:
         st.session_state.analytics_rules = [
             {
                 "table": tables[0],
                 "column": None,
-                "operator": "All",   # default
+                "operator": "All",
                 "value": None,
                 "operation_filter": "All",
                 "date_col": None,
@@ -222,6 +230,7 @@ if page == "Analytics":
 
     rules = st.session_state.analytics_rules
 
+    # Rule add/remove helpers
     def add_rule():
         rules.append(
             {
@@ -236,186 +245,185 @@ if page == "Analytics":
             }
         )
 
-    st.markdown("### Rules")
+    st.markdown("### 🔍 Rules")
 
-    add_col, _ = st.columns([0.2, 0.8])
-    if add_col.button("➕ Add Rule"):
+    # Add rule button
+    add_btn_col, _ = st.columns([0.25, 0.75])
+    if add_btn_col.button("➕ Add Rule"):
         add_rule()
 
-    new_rules: list[dict[str, Any]] = []
+    new_rules = []
 
-    # ---------- RENDER EACH RULE ----------
+    # ---------------------------------------------------
+    # Render Each Rule
+    # ---------------------------------------------------
     for idx, rule in enumerate(rules):
         st.markdown(f"#### Rule {idx + 1}")
         c_table, c_remove = st.columns([0.9, 0.1])
 
-        # Table selector
         selected_table = c_table.selectbox(
             "Table",
-            options=tables,
-            index=tables.index(rule.get("table", tables[0])),
-            key=f"rule_table_{idx}",
+            tables,
+            index=tables.index(rule["table"]),
+            key=f"table_{idx}"
         )
 
-        remove_rule = c_remove.button("❌", key=f"rule_remove_{idx}")
+        remove_clicked = c_remove.button("❌", key=f"remove_{idx}")
 
         df_tbl = get_table_df(selected_table)
-        if df_tbl.empty:
-            st.warning(f"No data in `{selected_table}`.")
-            if not remove_rule:
-                new_rules.append(rule | {"table": selected_table})
-            continue
-
         cols = df_tbl.columns.tolist()
 
-        # ---- Column / Operator / Value ----
-        c1, c2, c3 = st.columns([2, 2, 3])
+        if df_tbl.empty:
+            st.warning(f"No data in `{selected_table}`.")
+            if not remove_clicked:
+                new_rules.append(rule | {"table": selected_table})
+            st.markdown("---")
+            continue
 
-        selected_column = c1.selectbox(
+        # Column selector
+        col1, col2, col3 = st.columns([2, 2, 3])
+
+        selected_column = col1.selectbox(
             "Column",
-            options=cols,
-            index=cols.index(rule.get("column")) if rule.get("column") in cols else 0,
-            key=f"rule_col_{idx}",
+            cols,
+            index=cols.index(rule["column"]) if rule["column"] in cols else 0,
+            key=f"col_{idx}"
         )
 
         operators = ["All", "equals", "not equals", "contains"]
-        selected_operator = c2.selectbox(
+        selected_operator = col2.selectbox(
             "Operator",
             operators,
-            index=operators.index(rule.get("operator", "All")),
-            key=f"rule_op_{idx}",
+            index=operators.index(rule["operator"]),
+            key=f"op_{idx}"
         )
 
-        value_options = (
-            df_tbl[selected_column].dropna().astype(str).sort_values().unique().tolist()
-        )
+        # Value dropdown (auto derived from table)
+        values = df_tbl[selected_column].dropna().astype(str).unique().tolist()
+        values.sort()
 
-        if value_options and selected_operator != "All":
-            default_val = rule.get("value", value_options[0])
-            selected_value = c3.selectbox(
+        if selected_operator != "All" and values:
+            selected_value = col3.selectbox(
                 "Value",
-                options=value_options,
-                index=value_options.index(default_val)
-                if default_val in value_options
-                else 0,
-                key=f"rule_val_{idx}",
+                values,
+                index=values.index(rule["value"]) if rule["value"] in values else 0,
+                key=f"val_{idx}"
             )
         else:
-            c3.write("All values")
+            col3.write("All values")
             selected_value = None
 
-        # ---- Operation filter ----
-        op_col = (
-            "operation"
-            if "operation" in cols
-            else pick_column(["operation"], cols)
-        )
+        # Operation column detection
+        operation_col = pick_column(["operation"], cols)
 
-        c4, c5 = st.columns([1, 2])
-        if op_col:
-            op_vals = (
-                df_tbl[op_col].dropna().astype(str).sort_values().unique().tolist()
-            )
-            selected_op_filter = c4.selectbox(
+        c_op, c_date = st.columns([1.2, 3])
+
+        # Operation filter dropdown
+        if operation_col:
+            op_vals = df_tbl[operation_col].dropna().astype(str).unique().tolist()
+            op_vals.sort()
+
+            selected_operation = c_op.selectbox(
                 "Operation",
                 ["All"] + op_vals,
-                index=(
-                    ["All"] + op_vals
-                ).index(rule.get("operation_filter", "All")),
-                key=f"rule_operation_filter_{idx}",
+                index=(["All"] + op_vals).index(rule["operation_filter"])
+                if rule["operation_filter"] in (["All"] + op_vals) else 0,
+                key=f"op_filter_{idx}"
             )
         else:
-            c4.write("Operation\n(not available)")
-            selected_op_filter = "All"
+            selected_operation = "All"
+            c_op.write("Operation column not found")
 
-        # ---- Date range detection ----
-        date_col_lower = pick_column(
+        # DATE FILTERS
+        date_col = pick_column(
             ["updatedat", "updated_at", "createdat", "created_at", "timestamp"],
-            [c.lower() for c in cols],
-        )
-        real_date_col = (
-            [c for c in cols if c.lower() == date_col_lower][0]
-            if date_col_lower
-            else None
+            cols
         )
 
-        # ---- Date inputs ----
-        if real_date_col:
-            df_tbl[real_date_col] = pd.to_datetime(df_tbl[real_date_col], errors="coerce", utc=True)
-            if df_tbl[real_date_col].notna().any():
-                min_ts = df_tbl[real_date_col].min()
-                max_ts = df_tbl[real_date_col].max()
+        if date_col:
+            # Convert column to datetime
+            df_tbl[date_col] = pd.to_datetime(df_tbl[date_col], errors="coerce", utc=True)
 
-                d1, d2 = c5.columns(2)
+            # --- NEW DEFAULT RANGE ---
+            now = pd.Timestamp.now(tz="UTC")
+            default_start = now - pd.DateOffset(months=2)
+            default_end = now + pd.DateOffset(days=1)
 
-                start_date = d1.date_input(
-                    "Start date",
-                    value=min_ts.date(),
-                    key=f"rule_start_date_{idx}",
-                )
-                start_time = d1.time_input(
-                    "Start time",
-                    value=min_ts.time(),
-                    key=f"rule_start_time_{idx}",
-                )
+            d1, d2 = c_date.columns(2)
 
-                end_date = d2.date_input(
-                    "End date",
-                    value=max_ts.date(),
-                    key=f"rule_end_date_{idx}",
-                )
-                end_time = d2.time_input(
-                    "End time",
-                    value=max_ts.time(),
-                    key=f"rule_end_time_{idx}",
-                )
+            # Default start values
+            start_date = d1.date_input(
+                "Start Date",
+                value=default_start.date(),
+                key=f"sd_{idx}"
+            )
+            start_time = d1.time_input(
+                "Start Time",
+                value=default_start.time(),
+                key=f"st_{idx}"
+            )
 
-                start_dt = pd.to_datetime(f"{start_date} {start_time}", utc=True)
-                end_dt = pd.to_datetime(f"{end_date} {end_time}", utc=True)
-            else:
-                c5.write("Date range not available")
-                start_dt = end_dt = None
+            # Default end values
+            end_date = d2.date_input(
+                "End Date",
+                value=default_end.date(),
+                key=f"ed_{idx}"
+            )
+            end_time = d2.time_input(
+                "End Time",
+                value=default_end.time(),
+                key=f"et_{idx}"
+            )
+
+            # Convert to timezone-aware timestamps
+            start_dt = pd.to_datetime(f"{start_date} {start_time}", utc=True)
+            end_dt = pd.to_datetime(f"{end_date} {end_time}", utc=True)
         else:
-            c5.write("Date range not available")
+            c_date.write("No date column found")
             start_dt = end_dt = None
 
-        # Save updated rule
-        if not remove_rule:
-            new_rules.append(
-                {
-                    "table": selected_table,
-                    "column": selected_column,
-                    "operator": selected_operator,
-                    "value": selected_value,
-                    "operation_filter": selected_op_filter,
-                    "date_col": real_date_col,
-                    "start_dt": start_dt,
-                    "end_dt": end_dt,
-                }
-            )
+
+        if not remove_clicked:
+            new_rules.append({
+                "table": selected_table,
+                "column": selected_column,
+                "operator": selected_operator,
+                "value": selected_value,
+                "operation_filter": selected_operation,
+                "date_col": date_col,
+                "start_dt": start_dt,
+                "end_dt": end_dt,
+            })
 
         st.markdown("---")
 
-    # Finalize rules
+    # Update state
+    st.session_state.analytics_rules = new_rules
     rules = new_rules
-    st.session_state.analytics_rules = rules
 
-    # AND / OR between rules
+    # ---------------------------------------------------
+    # AND / OR COMBINATION
+    # ---------------------------------------------------
     if len(rules) > 1:
         combine_mode = st.radio(
             "Combine rules with:",
             ["AND", "OR"],
             horizontal=True,
-            key="rules_combine_mode",
+            key="combine_mode"
         )
     else:
         combine_mode = "AND"
 
+    # ---------------------------------------------------
+    # COMPUTE BUTTON
+    # ---------------------------------------------------
     compute = st.button("Compute")
     if not compute:
         st.stop()
 
-    # ---------- APPLY RULES ----------
+    # ---------------------------------------------------
+    # APPLY RULES ENGINE (FIXED VERSION)
+    # ---------------------------------------------------
     from collections import defaultdict
 
     rules_by_table = defaultdict(list)
@@ -430,7 +438,7 @@ if page == "Analytics":
         if df_tbl.empty:
             continue
 
-        combined_mask = None
+        rule_masks = []
 
         for r in tbl_rules:
             mask = pd.Series([True] * len(df_tbl))
@@ -443,52 +451,57 @@ if page == "Analytics":
             start_dt = r["start_dt"]
             end_dt = r["end_dt"]
 
-            # ---- Column Filter ----
-            if col in df_tbl.columns and op != "All":
+            # Column filter
+            if op != "All" and col in df_tbl.columns and val is not None:
                 series = df_tbl[col].astype(str)
+                if op == "equals":
+                    mask &= series == val
+                elif op == "not equals":
+                    mask &= series != val
+                elif op == "contains":
+                    mask &= series.str.contains(val, case=False, na=False)
 
-                if op in ["equals", "not equals", "contains"] and val is not None:
-                    val_str = str(val)
-
-                    if op == "equals":
-                        mask &= series == val_str
-                    elif op == "not equals":
-                        mask &= series != val_str
-                    elif op == "contains":
-                        mask &= series.str.contains(val_str, case=False, na=False)
-
-            # ---- Operation filter ----
-            if "operation" in df_tbl.columns and op_filter != "All":
+            # Operation filter
+            if op_filter != "All" and "operation" in df_tbl.columns:
                 mask &= df_tbl["operation"].astype(str) == op_filter
 
-            # ---- Date range (timezone-safe) ----
+            # Date filter
             if date_col and date_col in df_tbl.columns and start_dt and end_dt:
                 mask &= (df_tbl[date_col] >= start_dt) & (df_tbl[date_col] <= end_dt)
 
-            # ---- Combine masks ----
-            if combined_mask is None:
-                combined_mask = mask
+            rule_masks.append(mask)
+
+        # Combine rule masks correctly
+        if len(rule_masks) == 0:
+            combined_mask = pd.Series([True] * len(df_tbl))
+        elif len(rule_masks) == 1:
+            combined_mask = rule_masks[0]
+        else:
+            if combine_mode == "AND":
+                combined_mask = rule_masks[0]
+                for m in rule_masks[1:]:
+                    combined_mask &= m
             else:
-                if combine_mode == "AND":
-                    combined_mask &= mask
-                else:
-                    combined_mask |= mask
+                combined_mask = rule_masks[0]
+                for m in rule_masks[1:]:
+                    combined_mask |= m
 
-        filtered_df = df_tbl[combined_mask] if combined_mask is not None else df_tbl
-
+        filtered_df = df_tbl[combined_mask]
         results_by_table[table_name] = filtered_df
         total_rows += len(filtered_df)
 
-    # ---------- DISPLAY ----------
-    st.markdown("### Results")
-    st.write(f"Total rows across all tables: **{total_rows}**")
+    # ---------------------------------------------------
+    # DISPLAY RESULTS
+    # ---------------------------------------------------
+    st.markdown("### 📊 Results")
+    st.write(f"Total rows returned: **{total_rows}**")
 
-    for table_name, df_res in results_by_table.items():
-        st.subheader(f"📄 {table_name} ({len(df_res)} rows)")
-        if df_res.empty:
-            st.info("No rows for this table.")
-            continue
-        st.dataframe(df_res, use_container_width=True)
+    for table_name, df in results_by_table.items():
+        st.subheader(f"{table_name} — {len(df)} rows")
+        if df.empty:
+            st.info("No matching rows.")
+        else:
+            st.dataframe(df, use_container_width=True)
 
     st.stop()
 
