@@ -1,48 +1,76 @@
-import sqlite3
-import bcrypt
+from supabase import create_client, Client
+from dotenv import load_dotenv
+import os
 
-DB_PATH = "users.db"
+load_dotenv()
 
-def init_db() -> None:
-    conn = sqlite3.connect(DB_PATH)
-    cur = conn.cursor()
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS users (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            email TEXT UNIQUE NOT NULL,
-            password_hash TEXT NOT NULL,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
-    conn.commit()
-    conn.close()
+SUPABASE_URL = os.getenv("SUPABASE_URL")
+SUPABASE_ANON_KEY = os.getenv("SUPABASE_ANON_KEY")
+SUPABASE_SERVICE_ROLE = os.getenv("SUPABASE_SERVICE_ROLE")
 
-def create_user(email: str, password: str) -> bool:
-    if not email.endswith("@kovon.io"):
-        return False
-    conn = sqlite3.connect(DB_PATH)
-    cur = conn.cursor()
-    hashed_pw = bcrypt.hashpw(password.encode(), bcrypt.gensalt())
+supabase: Client = create_client(SUPABASE_URL, SUPABASE_ANON_KEY)
+
+# ============================================================
+# Signup (email verification required)
+# ============================================================
+def signup(email: str, password: str):
     try:
-        cur.execute(
-            "INSERT INTO users (email, password_hash) VALUES (?, ?)",
-            (email, hashed_pw)
+        res = supabase.auth.sign_up(
+            {
+                "email": email,
+                "password": password,
+            }
         )
-        conn.commit()
+
+        if res.user is None:
+            return {"error": "Signup failed or email already registered"}
+
+        return {"user": res.user.email}
+
+    except Exception as e:
+        return {"error": str(e)}
+
+
+# ============================================================
+# Sign-in
+# ============================================================
+def signin(email: str, password: str):
+    try:
+        res = supabase.auth.sign_in_with_password(
+            {
+                "email": email,
+                "password": password
+            }
+        )
+
+        if res.session is None:
+            return {"error": "Invalid credentials or email not verified"}
+
+        return {"session": res.session, "user": res.user.email}
+
+    except Exception as e:
+        return {"error": str(e)}
+
+
+# ============================================================
+# Who is currently logged in?
+# ============================================================
+def get_current_user():
+    try:
+        session = supabase.auth.get_session()
+        if session and session.session and session.session.user:
+            return session
+        return None
+    except Exception:
+        return None
+
+
+# ============================================================
+# Logout
+# ============================================================
+def signout():
+    try:
+        supabase.auth.sign_out()
         return True
-    except sqlite3.IntegrityError:
+    except Exception:
         return False
-    finally:
-        conn.close()
-
-
-def authenticate_user(email: str, password: str) -> bool:
-    conn = sqlite3.connect(DB_PATH)
-    cur = conn.cursor()
-    cur.execute("SELECT password_hash FROM users WHERE email = ?", (email,))
-    row = cur.fetchone()
-    conn.close()
-    if not row:
-        return False
-    stored_hash = row[0]
-    return bcrypt.checkpw(password.encode(), stored_hash)
