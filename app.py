@@ -1,3 +1,6 @@
+# ========================
+# app.py — FULL FINAL VERSION
+# ========================
 import os
 import re
 import sqlite3
@@ -8,6 +11,11 @@ import pandas as pd
 import streamlit as st
 from dotenv import load_dotenv
 from supabase import create_client, Client
+
+# ========================
+# CONFIG
+# ========================
+USER_ID_COLUMN = "userId"   # change if needed
 
 # ------------------------
 # STREAMLIT CONFIG
@@ -21,7 +29,6 @@ st.set_page_config(
 # ENV SETUP
 # ------------------------
 load_dotenv()
-
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_SERVICE_ROLE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
 
@@ -34,51 +41,34 @@ supabase: Client = create_client(
 # SQLITE AUTH
 # ------------------------
 def init_auth_db():
-    conn = sqlite3.connect("auth.db")
-    cur = conn.cursor()
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS users (
-            email TEXT PRIMARY KEY,
-            password_hash TEXT NOT NULL,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    with sqlite3.connect("auth.db") as conn:
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS users (
+                email TEXT PRIMARY KEY,
+                password_hash TEXT NOT NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+
+def user_exists(email):
+    with sqlite3.connect("auth.db") as conn:
+        return conn.execute(
+            "SELECT 1 FROM users WHERE email = ?", (email,)
+        ).fetchone() is not None
+
+def create_user(email, password):
+    pw = bcrypt.hashpw(password.encode(), bcrypt.gensalt()).decode()
+    with sqlite3.connect("auth.db") as conn:
+        conn.execute(
+            "INSERT INTO users VALUES (?, ?, CURRENT_TIMESTAMP)",
+            (email, pw)
         )
-    """)
-    conn.commit()
-    conn.close()
 
-def user_exists(email: str) -> bool:
-    conn = sqlite3.connect("auth.db")
-    cur = conn.cursor()
-    cur.execute("SELECT 1 FROM users WHERE email = ?", (email,))
-    exists = cur.fetchone() is not None
-    conn.close()
-    return exists
-
-def create_user(email: str, password: str):
-    password_hash = bcrypt.hashpw(
-        password.encode(),
-        bcrypt.gensalt()
-    ).decode()
-
-    conn = sqlite3.connect("auth.db")
-    cur = conn.cursor()
-    cur.execute(
-        "INSERT INTO users (email, password_hash) VALUES (?, ?)",
-        (email, password_hash)
-    )
-    conn.commit()
-    conn.close()
-
-def authenticate_user(email: str, password: str) -> bool:
-    conn = sqlite3.connect("auth.db")
-    cur = conn.cursor()
-    cur.execute(
-        "SELECT password_hash FROM users WHERE email = ?",
-        (email,)
-    )
-    row = cur.fetchone()
-    conn.close()
-
+def authenticate_user(email, password):
+    with sqlite3.connect("auth.db") as conn:
+        row = conn.execute(
+            "SELECT password_hash FROM users WHERE email = ?", (email,)
+        ).fetchone()
     return bool(row and bcrypt.checkpw(password.encode(), row[0].encode()))
 
 # ------------------------
@@ -93,7 +83,7 @@ def auth_ui():
 
     if st.button(mode):
         if not re.match(r"^[^@]+@kovon\.io$", email):
-            st.error("Only @kovon.io emails are allowed")
+            st.error("Only @kovon.io emails allowed")
             return
 
         if len(password) < 8:
@@ -102,16 +92,14 @@ def auth_ui():
 
         if mode == "Sign Up":
             if user_exists(email):
-                st.error("User already exists. Please login.")
+                st.error("User already exists")
                 return
             create_user(email, password)
             st.success("Signup successful. Please login.")
-
         else:
             if not authenticate_user(email, password):
-                st.error("Invalid email or password")
+                st.error("Invalid credentials")
                 return
-
             st.session_state["authenticated"] = True
             st.session_state["email"] = email
             st.rerun()
@@ -124,43 +112,43 @@ def get_all_tables():
     sql = """
     select tablename
     from pg_tables
-    where schemaname = 'public'
+    where schemaname='public'
     order by tablename
     """
+    res = supabase.rpc("run_sql", {"query": sql}).execute()
+    return [r["tablename"] for r in res.data or []]
 
-    result = supabase.rpc("run_sql", {"query": sql}).execute()
-    return [row["tablename"] for row in result.data or []]
+@st.cache_data(ttl=300)
+def get_table_columns(table):
+    sql = f"""
+    select column_name
+    from information_schema.columns
+    where table_schema='public'
+      and table_name='{table}'
+    order by ordinal_position
+    """
+    res = supabase.rpc("run_sql", {"query": sql}).execute()
+    return [r["column_name"] for r in res.data or []]
 
-def fetch_table_data(table, time_column, start_dt, end_dt):
-    response = (
-        supabase
-        .table(table)
-        .select("*", count="exact")
-        .gte(time_column, start_dt.isoformat())
-        .lte(time_column, end_dt.isoformat())
-        .execute()
-    )
+def qcol(table, col):
+    return f'"{table}"."{col}"'
 
-    return pd.DataFrame(response.data), response.count or 0
-
-# ------------------------
-# DASHBOARD UI
-# ------------------------
-def dashboard_ui():
-    st.sidebar.success(f"Logged in as {st.session_state['email']}")
-
+# =====================================================
+# PAGE 1 — DATA EXPLORER
+# =====================================================
+def data_explorer_ui():
     st.title("📊 Data Explorer")
 
     if "table_results" not in st.session_state:
         st.session_state["table_results"] = {}
 
     tables = get_all_tables()
-
     selected_tables = st.multiselect("Select Tables", tables)
+
     if not selected_tables:
         return
 
-    time_column = st.radio(
+    mode = st.radio(
         "Filter column",
         ["createdAt", "updatedAt"],
         horizontal=True
@@ -182,25 +170,192 @@ def dashboard_ui():
             start_dt = datetime.combine(sd, stt)
             end_dt = datetime.combine(ed, ett)
 
-            if st.button(f"Run Query — {table}", key=f"run_{table}"):
-                df, count = fetch_table_data(table, time_column, start_dt, end_dt)
-                st.session_state["table_results"][table] = {
-                    "df": df,
-                    "count": count
-                }
+            if st.button("Run Query", key=f"run_{table}"):
+                df = pd.DataFrame(
+                    supabase.table(table)
+                    .select("*")
+                    .gte(mode, start_dt.isoformat())
+                    .lte(mode, end_dt.isoformat())
+                    .execute()
+                    .data
+                )
+
+                if mode == "updatedAt":
+                    df = df[df["updatedAt"] != df["createdAt"]]
+
+                st.session_state["table_results"][table] = df
 
             if table in st.session_state["table_results"]:
-                res = st.session_state["table_results"][table]
-                st.metric(f"{table} — Record Count", res["count"])
-
-                if res["df"].empty:
-                    st.warning("No records found")
+                df = st.session_state["table_results"][table]
+                st.metric("Records", len(df))
+                if not df.empty:
+                    st.dataframe(df, width="stretch")
                 else:
-                    st.dataframe(res["df"], width="stretch")
+                    st.warning("No records found")
 
-# ------------------------
+# =====================================================
+# PAGE 2 — COLUMN UPDATE ANALYSIS
+# =====================================================
+def column_update_analysis_ui():
+    st.title("🧮 Column Update Analysis")
+
+    tables = get_all_tables()
+    selected_tables = st.multiselect("Select Tables", tables)
+
+    if not selected_tables:
+        return
+
+    mode = st.radio(
+        "Mode",
+        ["createdAt", "updatedAt"],
+        horizontal=True
+    )
+
+    for table in selected_tables:
+        with st.expander(f"📁 {table}", expanded=True):
+            columns = [
+                c for c in get_table_columns(table)
+                if c not in ("createdAt", "updatedAt")
+            ]
+
+            if not columns:
+                st.warning("No analyzable columns")
+                continue
+
+            column = st.selectbox(
+                "Select Column",
+                columns,
+                key=f"{table}_col"
+            )
+
+            c1, c2, c3, c4 = st.columns(4)
+            with c1:
+                sd = st.date_input("Start Date", key=f"{table}_asd")
+            with c2:
+                stt = st.time_input("Start Time", key=f"{table}_ast")
+            with c3:
+                ed = st.date_input("End Date", key=f"{table}_aed")
+            with c4:
+                ett = st.time_input("End Time", key=f"{table}_aet")
+
+            start_dt = datetime.combine(sd, stt)
+            end_dt = datetime.combine(ed, ett)
+
+            if st.button("Run Analysis", key=f"analyze_{table}"):
+                df = pd.DataFrame(
+                    supabase.table(table)
+                    .select("*")
+                    .gte(mode, start_dt.isoformat())
+                    .lte(mode, end_dt.isoformat())
+                    .execute()
+                    .data
+                )
+
+                if mode == "updatedAt":
+                    df = df[df["updatedAt"] != df["createdAt"]]
+
+                if USER_ID_COLUMN not in df.columns:
+                    st.error(f"{USER_ID_COLUMN} not found")
+                    continue
+
+                df = df[df[column].notna() & df[USER_ID_COLUMN].notna()]
+
+                st.metric("Users affected", df[USER_ID_COLUMN].nunique())
+
+                if not df.empty:
+                    st.dataframe(
+                        df[[USER_ID_COLUMN, "createdAt", "updatedAt", column]],
+                        width="stretch"
+                    )
+                else:
+                    st.warning("No matching records")
+
+# =====================================================
+# PAGE 3 — JOINS
+# =====================================================
+def joins_ui():
+    st.title("🔗 SQL Joins Builder")
+
+    tables = get_all_tables()
+    base_table = st.selectbox("Base Table", tables)
+
+    join_count = st.number_input(
+        "Number of Joins",
+        min_value=1,
+        max_value=5,
+        value=1
+    )
+
+    joins = []
+
+    for i in range(join_count):
+        st.subheader(f"Join #{i + 1}")
+        c1, c2, c3, c4 = st.columns(4)
+
+        join_type = c1.selectbox(
+            "Join Type",
+            ["INNER JOIN", "LEFT JOIN", "RIGHT JOIN", "FULL JOIN"],
+            key=f"jt_{i}"
+        )
+
+        join_table = c2.selectbox(
+            "Join Table",
+            [t for t in tables if t != base_table],
+            key=f"jtab_{i}"
+        )
+
+        base_col = c3.selectbox(
+            "Base Column",
+            get_table_columns(base_table),
+            key=f"bcol_{i}"
+        )
+
+        join_col = c4.selectbox(
+            "Join Column",
+            get_table_columns(join_table),
+            key=f"jcol_{i}"
+        )
+
+        joins.append((join_type, join_table, base_col, join_col))
+
+    st.divider()
+
+    select_columns = []
+    all_tables = [base_table] + [j[1] for j in joins]
+
+    for t in all_tables:
+        chosen = st.multiselect(
+            f"Select columns from {t}",
+            get_table_columns(t),
+            key=f"sel_{t}"
+        )
+        for c in chosen:
+            select_columns.append((t, c))
+
+    if not select_columns:
+        st.warning("Select at least one column")
+        return
+
+    if st.button("Run Join Query"):
+        select_sql = ", ".join(qcol(t, c) for t, c in select_columns)
+        sql = f'SELECT {select_sql} FROM "{base_table}"'
+
+        for jt, jt_table, bc, jc in joins:
+            sql += (
+                f' {jt} "{jt_table}" '
+                f'ON "{base_table}"."{bc}" = "{jt_table}"."{jc}"'
+            )
+
+        with st.spinner("Executing join query..."):
+            res = supabase.rpc("run_sql", {"query": sql}).execute()
+            df = pd.DataFrame(res.data or [])
+
+        st.metric("Rows returned", len(df))
+        st.dataframe(df, width="stretch")
+
+# =====================================================
 # MAIN
-# ------------------------
+# =====================================================
 def main():
     init_auth_db()
 
@@ -209,8 +364,21 @@ def main():
 
     if not st.session_state["authenticated"]:
         auth_ui()
+        return
+
+    st.sidebar.success(f"Logged in as {st.session_state['email']}")
+
+    page = st.sidebar.radio(
+        "Navigation",
+        ["📊 Data Explorer", "🧮 Column Update Analysis", "🔗 Joins"]
+    )
+
+    if page == "📊 Data Explorer":
+        data_explorer_ui()
+    elif page == "🧮 Column Update Analysis":
+        column_update_analysis_ui()
     else:
-        dashboard_ui()
+        joins_ui()
 
 if __name__ == "__main__":
     main()
