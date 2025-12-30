@@ -1,6 +1,3 @@
-# ========================
-# app.py — FULL FINAL VERSION
-# ========================
 import os
 import re
 import sqlite3
@@ -12,22 +9,13 @@ import streamlit as st
 from dotenv import load_dotenv
 from supabase import create_client, Client
 
-# ========================
-# CONFIG
-# ========================
-USER_ID_COLUMN = "userId"   # change if needed
+USER_ID_COLUMN = "userId"
 
-# ------------------------
-# STREAMLIT CONFIG
-# ------------------------
 st.set_page_config(
     page_title="Kovon Data Explorer",
     layout="wide",
 )
 
-# ------------------------
-# ENV SETUP
-# ------------------------
 load_dotenv()
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_SERVICE_ROLE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
@@ -37,9 +25,6 @@ supabase: Client = create_client(
     SUPABASE_SERVICE_ROLE_KEY
 )
 
-# ------------------------
-# SQLITE AUTH
-# ------------------------
 def init_auth_db():
     with sqlite3.connect("auth.db") as conn:
         conn.execute("""
@@ -71,9 +56,6 @@ def authenticate_user(email, password):
         ).fetchone()
     return bool(row and bcrypt.checkpw(password.encode(), row[0].encode()))
 
-# ------------------------
-# AUTH UI
-# ------------------------
 def auth_ui():
     st.title("🔐 Kovon Internal Dashboard")
 
@@ -104,9 +86,6 @@ def auth_ui():
             st.session_state["email"] = email
             st.rerun()
 
-# ------------------------
-# SUPABASE HELPERS
-# ------------------------
 @st.cache_data(ttl=300)
 def get_all_tables():
     sql = """
@@ -133,9 +112,6 @@ def get_table_columns(table):
 def qcol(table, col):
     return f'"{table}"."{col}"'
 
-# =====================================================
-# PAGE 1 — DATA EXPLORER
-# =====================================================
 def data_explorer_ui():
     st.title("📊 Data Explorer")
 
@@ -193,9 +169,6 @@ def data_explorer_ui():
                 else:
                     st.warning("No records found")
 
-# =====================================================
-# PAGE 2 — COLUMN UPDATE ANALYSIS
-# =====================================================
 def column_update_analysis_ui():
     st.title("🧮 Column Update Analysis")
 
@@ -270,9 +243,6 @@ def column_update_analysis_ui():
                 else:
                     st.warning("No matching records")
 
-# =====================================================
-# PAGE 3 — JOINS
-# =====================================================
 def joins_ui():
     st.title("🔗 SQL Joins Builder")
 
@@ -288,9 +258,6 @@ def joins_ui():
 
     joins = []
 
-    # -------------------------
-    # JOIN DEFINITIONS
-    # -------------------------
     for i in range(join_count):
         st.subheader(f"Join #{i + 1}")
         c1, c2, c3, c4 = st.columns(4)
@@ -323,9 +290,6 @@ def joins_ui():
 
     st.divider()
 
-    # -------------------------
-    # COLUMN SELECTION
-    # -------------------------
     select_columns = []
     all_tables = [base_table] + [j[1] for j in joins]
 
@@ -342,9 +306,6 @@ def joins_ui():
         st.warning("Select at least one column")
         return
 
-    # -------------------------
-    # RUN QUERY (ONCE)
-    # -------------------------
     if st.button("Run Join Query"):
         select_sql = ", ".join(qcol(t, c) for t, c in select_columns)
         sql = f'SELECT {select_sql} FROM "{base_table}"'
@@ -359,9 +320,6 @@ def joins_ui():
             res = supabase.rpc("run_sql", {"query": sql}).execute()
             st.session_state["join_df"] = pd.DataFrame(res.data or [])
 
-    # -------------------------
-    # DISPLAY + UNIQUE FILTER
-    # -------------------------
     if "join_df" not in st.session_state:
         return
 
@@ -387,15 +345,10 @@ def joins_ui():
 
         filtered_df = df.drop_duplicates(subset=[unique_column])
 
-    # -------------------------
-    # RESULTS
-    # -------------------------
+
     st.metric("Rows returned", len(filtered_df))
     st.dataframe(filtered_df, width="stretch")
 
-# =====================================================
-# MAIN
-# =====================================================
 def main():
     init_auth_db()
 
