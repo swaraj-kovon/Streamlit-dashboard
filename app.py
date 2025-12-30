@@ -288,6 +288,9 @@ def joins_ui():
 
     joins = []
 
+    # -------------------------
+    # JOIN DEFINITIONS
+    # -------------------------
     for i in range(join_count):
         st.subheader(f"Join #{i + 1}")
         c1, c2, c3, c4 = st.columns(4)
@@ -320,6 +323,9 @@ def joins_ui():
 
     st.divider()
 
+    # -------------------------
+    # COLUMN SELECTION
+    # -------------------------
     select_columns = []
     all_tables = [base_table] + [j[1] for j in joins]
 
@@ -336,6 +342,9 @@ def joins_ui():
         st.warning("Select at least one column")
         return
 
+    # -------------------------
+    # RUN QUERY (ONCE)
+    # -------------------------
     if st.button("Run Join Query"):
         select_sql = ", ".join(qcol(t, c) for t, c in select_columns)
         sql = f'SELECT {select_sql} FROM "{base_table}"'
@@ -348,10 +357,41 @@ def joins_ui():
 
         with st.spinner("Executing join query..."):
             res = supabase.rpc("run_sql", {"query": sql}).execute()
-            df = pd.DataFrame(res.data or [])
+            st.session_state["join_df"] = pd.DataFrame(res.data or [])
 
-        st.metric("Rows returned", len(df))
-        st.dataframe(df, width="stretch")
+    # -------------------------
+    # DISPLAY + UNIQUE FILTER
+    # -------------------------
+    if "join_df" not in st.session_state:
+        return
+
+    df = st.session_state["join_df"]
+
+    st.divider()
+
+    unique_only = st.radio(
+        "Show unique only",
+        ["No", "Yes"],
+        horizontal=True,
+        key="unique_only"
+    )
+
+    filtered_df = df
+
+    if unique_only == "Yes" and not df.empty:
+        unique_column = st.selectbox(
+            "Select column",
+            df.columns.tolist(),
+            key="unique_column"
+        )
+
+        filtered_df = df.drop_duplicates(subset=[unique_column])
+
+    # -------------------------
+    # RESULTS
+    # -------------------------
+    st.metric("Rows returned", len(filtered_df))
+    st.dataframe(filtered_df, width="stretch")
 
 # =====================================================
 # MAIN
